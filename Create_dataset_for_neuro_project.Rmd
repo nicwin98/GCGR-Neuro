@@ -1,0 +1,324 @@
+---
+title: "Create dataset for neuro project"
+author: "MWS"
+date: "2023-11-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(data.table)
+source(here("R/functions.r"))
+```
+
+# 1. Load data
+```{r}
+# UKB showcase data
+df <- fread(here("data-raw/your_UKB_data.csv"))
+
+# dataset with gcgr_variants
+gcgr <- fread(here("data/your_gcgr_data.csv"))
+
+# Withdrawals (updated 14/11 2023)
+withdrawals <- fread(here("data-raw/withdraw_data.txt"))
+
+
+# Neurodegenerative diseases were downloaded from DNA nexus
+neuro <- fread(here("data-raw/your_neuro_data.csv"))
+setnames(neuro, "Participant ID", "eid")
+```
+
+Select variant columns from the gcgr dataset to include in Sashas data
+```{r}
+setnames(gcgr, "trunc", "frameshift") # we decided to call it framehshift mutations instead of truncated variants
+cols_to_keep <- c("eid", "variant_type", "cAMP_LoF", "frameshift", "G40S")
+gcgr2 <- gcgr[, ..cols_to_keep]
+```
+
+Update col names
+```{r}
+setnames(df, "body_mass_index_bmi_f21001_0_0", "BMI")
+setnames(df, "age_when_attended_assessment_centre_f21003_0_0", "age_enrolment")
+setnames(df, "sex_f31_0_0", "sex")
+setnames(df, "glycated_haemoglobin_hba1c_f30750_0_0", "hba1c")
+```
+
+
+# 2. Define T2D 
+## 2.1 Full period
+```{r}
+df <- find_ICD10_filter(df, c("E11", "E14"), "T2D")
+df <- find_ICD10_filter(df, "E10", "T1D")
+count(df, T1D, T2D)
+```
+
+```{r}
+# Remove diabetes diagnosis if gestational diabetes only
+df$gdmonly[df$gestational_diabetes_only_f4041_0_0 == 1 | df$gestational_diabetes_only_f4041_1_0 == 1 | df$gestational_diabetes_only_f4041_2_0 == 1 | df$gestational_diabetes_only_f4041_3_0 == 1] <- T
+df$T1D[df$gdmonly == T & df$T2D == T] <- NA
+df$T2D[df$gdmonly == T & is.na(df$T1D)] <- NA
+df$T1D[df$gdmonly == T & is.na(df$T2D)] <- NA
+```
+
+**Diabetes medication codes**
+*Metformin*
+1140884600	metformin
+1140874686  glucophage 500 mg tablet 
+1141189090	rosiglitazone 1mg / metformin 500mg tablet
+
+*Sulfonylureas*
+1140874718  glibenclamide 
+1140874744	gliclazide
+1140874746  diamicron 80 mg tablet 
+1141152590  glimepiride
+1141156984  amaryl 1 mg tablet
+1140874646	glipizide
+1141157284	glipizide product
+1140874652  minodiab 2.5 mg tablet
+1140874674  tolbutamide
+1140874728  euglucon 2.5 mg
+
+*Others*
+1140868902	acarbose
+1140868908  glucobay 50 mg tablet
+1140857508  glucotard 5g/sachet mini-tablet
+1140882964  oral hypoglycemic
+
+*Metglitinides*
+1141173882	nateglinide
+1141173786  starlix 60 mg tablet
+1141168660	repaglinide
+
+*Glitazones*
+1141171646	pioglitazone
+1141171652  actos 15 mg tablet
+1141153254  troglitazone
+1141177600	rosiglitazone
+1141177606  avandia 4mg tablet
+
+*Insulin*
+1140883066	insulin product
+
+Filter for oral antihyperglycemic drugs and insulin
+```{r echo=TRUE, results='hide'}
+# oral antihyperglycemic drugs
+df <- find_drug_filter(df, c("1140874718","1140874744","1140874746","1141152590","1141156984","1140874646","1141157284","1140874652","1140874674","1140874728","1140868902","1140868908","1140857508","1141173882","1141173786","1141168660","1141171646","1141171652","1141153254","1141177600","1141177606","1140882964"), "oral_T2D_drug")
+
+# oral antihyperglycemic drugs at baseline
+df <- find_drug_filter_bs(df, c("1140874718","1140874744","1140874746","1141152590","1141156984","1140874646","1141157284","1140874652","1140874674","1140874728","1140868902","1140868908","1140857508","1141173882","1141173786","1141168660","1141171646","1141171652","1141153254","1141177600","1141177606","1140882964"), "oral_T2D_drug_bs")
+
+# Metformin treatment
+df <- find_drug_filter(df, c("1140884600","1140874686","1141189090"), "metformin")
+
+# Metformin treatment at baseline
+df <- find_drug_filter_bs(df, c("1140884600","1140874686","1141189090"), "metformin_bs")
+
+# Insulin treatment
+df <- find_drug_filter(df, "1140883066", "insulin_treatment")
+
+# Insulin treatment at baseline
+df <- find_drug_filter_bs(df, "1140883066", "insulin_treatment_bs")
+```
+
+Defining diabetes (2023 prevalence) = full period (fp)
+```{r}
+# create
+df$T2D_fp <- df$T2D
+df$T1D_fp <- df$T1D
+
+# MAke those individuals wihtout diabetes diagnosis as T2D if hba1c above 48:
+df$T2D_fp[df$hba1c>48 & (df$T2D_fp == F & df$T1D_fp == F)] <-  T
+
+# Make those individuals without diabetes diagnosis as T2D if oral T2D medication (excluding metformin):
+df$T2D_fp[df$oral_T2D_drug == T & (df$T2D_fp == F & df$T1D_fp == F)] <- T
+
+# Make those T1D individuals on oral T2D drug medication T2D:
+df$T1D_fp[(df$T2D_fp == T & df$T1D_fp == T) & (df$oral_T2D_drug == T | df$metformin == T)] <- F
+df$T2D_fp[df$T1D_fp == T & (df$oral_T2D_drug == T | df$metformin == T)] <- T
+df$T1D_fp[df$oral_T2D_drug == T | df$metformin == T] <- F
+
+# Make those diagnosed <20 y age as T1D
+df$T2D_fp[(df$age_diabetes_diagnosed_f2976_0_0 < 20 | df$age_diabetes_diagnosed_f2976_1_0 < 20 | df$age_diabetes_diagnosed_f2976_2_0 < 20 | df$age_diabetes_diagnosed_f2976_3_0 < 20 ) & df$T1D == T & df$T2D == T] <- F
+
+# Make those with double diagnosis as T1D if insulin treatment within 1 year of diagnosis and actual insulin treatment:
+df$ins1y[df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_0_0 == 1 | df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_1_0 == 1 | df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_2_0 == 1 | df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_3_0 == 1] <- T 
+df$ins1y[is.na(df$ins1y)] <- F
+df$T2D_fp[df$T1D_fp == T & df$T2D_fp == T & 
+              (df$ins1y & df$insulin_treatment)] <- F
+
+# Making those with double diagnosis T1D and T2D as T2D
+df$T1D_fp[df$T1D_fp == T & df$T2D_fp == T] <- F
+
+count(df, T1D, T2D) # only ICD10 codes
+count(df, T1D_fp, T2D_fp) # after futher definitions
+```
+
+## 2.2 Defining baseline T2D
+```{r}
+# Full-period prevalent T1 and T2 from ICD codes was performed above
+
+# Rename date columns
+setnames(df, "date_e14_first_reported_unspecified_diabetes_mellitus_f130714_0_0", "date_e14_rep")
+setnames(df, "date_e11_first_reported_noninsulindependent_diabetes_mellitus_f130708_0_0", "date_e11_rep")
+
+# Remove odd dates for t2d diagnosis (https://biobank.ndph.ox.ac.uk/showcase/coding.cgi?id=819)
+codings <- c("1900-01-01", "1901-01-01", "1902-02-02", "1903-03-03", "1909-09-09", "2037-07-07")
+
+df[date_e11_rep %in% codings, date_e11_rep := NA]
+df[date_e14_rep %in% codings, date_e14_rep := NA]
+
+# Merge the date columns and keep the earliest date of the two if both E11 and E14 are present
+df <- df %>% 
+   mutate(t2d_date = pmin(date_e11_rep, date_e14_rep))
+df[is.na(date_e11_rep), t2d_date := date_e14_rep]
+df[is.na(date_e14_rep), t2d_date := date_e11_rep]
+
+# Create column of baseline t2d 
+df[, T2D_bs := 0]
+df[T2D == 1 & t2d_date < date_of_attending_assessment_centre_f53_0_0, 
+   T2D_bs := 1]
+
+count(df, T2D_bs, hba1c>48)
+
+# Make those individuals wihtout diabetes diagnosis as T2D if hba1c (at baseline) above 48:
+df$T2D_bs[df$hba1c>48 & (df$T2D_bs == F & df$T1D_bs == F)] <-  1
+
+count(df, T2D_bs)
+
+# Make those individuals without diabetes diagnosis as T2D if oral T2D medication (excluding metformin) at baseline:
+df$T2D_bs[df$oral_T2D_drug_bs == T & (df$T2D_bs == F & df$T1D_bs == F)] <- T
+
+# Make those T1D individuals on oral T2D drug medication T2D:
+df$T1D_bs[(df$T2D_bs == T & df$T1D_bs == T) & (df$oral_T2D_drug_bs == T | df$metformin_bs == T)] <- F
+df$T2D_bs[df$T1D == T & (df$oral_T2D_drug_bs == T | df$metformin_bs == T)] <- T
+df$T1D_bs[df$oral_T2D_drug_bs == T | df$metformin_bs == T] <- F
+
+# Make those diagnosed <20 y age as T1D
+df$T2D_bs[(df$age_diabetes_diagnosed_f2976_0_0 < 20 | df$age_diabetes_diagnosed_f2976_1_0 < 20 | df$age_diabetes_diagnosed_f2976_2_0 < 20 | df$age_diabetes_diagnosed_f2976_3_0 < 20 ) & df$T1D_bs == T & df$T2D_bs == T] <- F
+
+# Make those with double diagnosis as T1D if insulin treatment within 1 year of diagnosis and actual insulin treatment:
+df$ins1y[df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_0_0 == 1 | df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_1_0 == 1 | df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_2_0 == 1 | df$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_3_0 == 1] <- T 
+df$ins1y[is.na(df$ins1y)] <- F
+df$T2D_bs[df$T1D_bs == T & df$T2D_bs == T & (df$ins1y & df$insulin_treatment_bs)] <- F
+
+# Making those with double diagnosis T1D and T2D as T2D
+df$T1D_bs[df$T1D_bs == T & df$T2D_bs == T] <- F
+
+count(df, T2D_bs)
+```
+
+# 3. Alcohol
+Calculate sum of average weekly intake of alcohol
+```{r echo=TRUE, results='hide'}
+# Set prefer not to answer and do not know (-1 and -3) to NA
+df$average_weekly_beer_plus_cider_intake_f1588_0_0[df$average_weekly_beer_plus_cider_intake_f1588_0_0<0] <- NA
+df$average_weekly_champagne_plus_white_wine_intake_f1578_0_0[df$average_weekly_champagne_plus_white_wine_intake_f1578_0_0<0] <- NA
+df$average_weekly_fortified_wine_intake_f1608_0_0[df$average_weekly_fortified_wine_intake_f1608_0_0<0] <- NA
+df$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0[df$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0<0] <- NA
+df$average_weekly_red_wine_intake_f1568_0_0[df$average_weekly_red_wine_intake_f1568_0_0<0] <- NA
+df$average_weekly_spirits_intake_f1598_0_0[df$average_weekly_spirits_intake_f1598_0_0<0] <- NA
+
+# units of alcohol in beverages: https://www.nhs.uk/live-well/alcohol-advice/calculating-alcohol-units/
+
+# weekly units of alcohol - redwine (f1568), 1 glass = 2.1 units
+df$average_weekly_red_wine_intake_f1568_0_0 <- df$average_weekly_red_wine_intake_f1568_0_0 * 2.1
+# weekly units of alcohol - champagne etc (f1578), 1 glass = 2.1 units
+df$average_weekly_champagne_plus_white_wine_intake_f1578_0_0 <- df$average_weekly_champagne_plus_white_wine_intake_f1578_0_0 * 2.1
+# weekly units of alcohol - beer and cider (f1588), 1 pint = 2 units
+df$average_weekly_beer_plus_cider_intake_f1588_0_0 <- df$average_weekly_beer_plus_cider_intake_f1588_0_0 * 2
+# weekly units of alcohol - spirits (f1598), 1 measure = 1 unit (no calculation needed)
+# weekly units of alcohol - fortified wine (f1608), 1 measure = 1 unit (no calculation needed)
+# weekly units of other alcoholic drinks incl alcopops, 1 glass = 1.5 units
+df$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0 <- df$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0 * 1.5
+
+#Calculate the sum of weekly units alcoholic intake
+df <- df %>%
+    rowwise() %>%
+    mutate(weekly_alcohol = sum(average_weekly_beer_plus_cider_intake_f1588_0_0,
+    average_weekly_champagne_plus_white_wine_intake_f1578_0_0,
+    average_weekly_fortified_wine_intake_f1608_0_0,
+    average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0,
+    average_weekly_red_wine_intake_f1568_0_0,
+    average_weekly_spirits_intake_f1598_0_0,
+    na.rm=T))
+
+```
+
+# 4. Neurodegenrative diseases
+```{r}
+setDT(df)
+df <- find_ICD10_filter(df, c("A810", "F000", "F001", "F002", "F009", "F010", "F011", "F012", "F013", "F018", "F019", "F020", "F021", 
+                              "F022", "F023", "F024", "F028", "F03", "F051", "F106", "G300", "G301", "G308", "G309", "G310", "G311", "G318", "I673"),
+                        "demens_diseases")
+
+df <- find_ICD10_filter(df, c("F00", "F01", "F02", "F03", "F04", "F05", "F06", "F07", "F09", "G30", "G31", "G32"), "neuro_diseases")
+
+df <- find_ICD10_filter(df, c("F00", "G30"), "alzheimer")
+df <- find_ICD10_filter(df, c("F01", "F02", "F03", "F04", "F05", "F06", "F07", "F09", "G31", "G32"), "neuro_non_alzheimer")
+
+```
+
+
+# 5. Diseases_of_the_pancreas
+```{r}
+setDT(df)
+df <- find_ICD10_filter(df, c("K85", "K86", "K87"), "pancreas_disease")
+```
+
+
+# 6. Age in 2023
+```{r}
+df$age_2023 <- 2023 - df$year_of_birth_f34_0_0
+```
+
+# 7. Rename date for enrolent
+```{r}
+df$date_enrolment <- df$date_of_attending_assessment_centre_f53_0_0
+```
+
+#8. Rename and merge death dates
+```{r}
+#there are two date collumns. Here they are merged into one collumn, and the earliest is kept in case there is a date in both cols. 
+df$date_death <- pmin(df$date_of_death_f40000_0_0, df$date_of_death_f40000_1_0, na.rm = TRUE)
+
+```
+
+#9. Rename lost to follow up
+```{r}
+df$date_lost_to_followup <- df$date_lost_to_followup_f191_0_0
+```
+
+
+# 10. Filter for ethnicity and sex chromosome aneuploudy
+```{r}
+# Exclude non-white participants 
+count(df, genetic_ethnic_grouping_f22006_0_0)
+df <- df[genetic_ethnic_grouping_f22006_0_0 == 1,] # 1 = caucasian
+
+# Exclude individuals with sex chromosome aneuploidy
+count(df, sex_chromosome_aneuploidy_f22019_0_0)
+df <- df[is.na(sex_chromosome_aneuploidy_f22019_0_0),]
+```
+
+
+# 11. clean up df and merge with gcgr variant data
+```{r}
+cols_to_keep <- c("eid", "sex", "BMI", "age_enrolment", "age_2023", "date_death", "date_lost_to_followup", "T1D_fp", "T2D_fp", "T2D_bs", "weekly_alcohol", "demens_diseases", "neuro_diseases", "pancreas_disease","alzheimer", "neuro_non_alzheimer", "date_e11_rep", "date_e14_rep", "date_enrolment")
+df2 <- df[, ..cols_to_keep]
+
+df_merged <- merge(df2, gcgr2, by = "eid", all.x = TRUE)
+df_merged <- merge(df_merged, neuro, by = "eid", all.x = TRUE)
+
+head(df_merged)
+```
+
+Export df_merged as csv
+```{r}
+fwrite(df_merged, file = here("data/your_data_filtered.csv"))
+```
+
+
+
+
